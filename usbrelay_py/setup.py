@@ -17,10 +17,10 @@
 from setuptools import setup, find_packages, Extension
 module1 = Extension(
     'usbrelay_py',
-    libraries= ['usbrelay'],
+    libraries= ['hidapi-hidraw'],
     library_dirs= ['../'],
     include_dirs= ['../'],
-    sources = ['src/libusbrelay_py.c']
+    sources = ['src/libusbrelay_py.c', '../libusbrelay.c']
 )
 
 setup(

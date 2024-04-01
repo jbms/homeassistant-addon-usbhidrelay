@@ -28,8 +28,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <unistd.h>
 #include <wchar.h>
 
-#include "gitversion.h"
-
 //Global variables
 
 relay_board *relay_boards = 0;
@@ -59,7 +57,7 @@ int enumerate_relay_boards(const char *product, int verbose, int debug)
 		if (relay_boards)
 			shutdown();
 	}
-	//Enumerate all HID USB devices 
+	//Enumerate all HID USB devices
 	devs = hid_enumerate(0, 0);
 
 	//Count the number of returned devices
@@ -92,7 +90,7 @@ int enumerate_relay_boards(const char *product, int verbose, int debug)
 				memcpy(relay_boards[relay].path, cur_dev->path,
 				       strlen(cur_dev->path) + 1);
 
-				
+
 				// Ucreatefun relays do not have any information returned from the HID report
 				// The USB serial is also fixed so this is copied to the module serial so that something can make the module unique
 				if (relay_boards[relay].module_type == UCREATE) {
@@ -351,7 +349,7 @@ int get_relay_board_count()
 	return relay_board_count;
 }
 
-/** 
+/**
  * Return the actual relay_board structs
  */
 relay_board *get_relay_boards()

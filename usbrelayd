@@ -1,4 +1,6 @@
 #! /usr/bin/env python3
+
+# https://github.com/donatmarko/kmtronic-usb-relaybox-mqtt/blob/master/main.py
 # usbrelayd: Control USB HID connected electrical relay modules via mqtt
 
 # Copyright (C) 2021  Darryl Bond
@@ -23,89 +25,162 @@
 # Topics are stat/SERIAL/RELAY or cmnd/SERIAL/RELAY
 # eg stat/QWERT/2 or cmnd/QWERT/2
 
-import paho.mqtt.client as mqtt
+import argparse
+import paho.mqtt.client
+import json
 import usbrelay_py
-import time
-import re
-import sys
-import configparser
 
-def publish_states(client):
+
+def get_relay_states():
+    result = {}
+
+    # Call `board_count` to initialize.
+    usbrelay_py.board_count()
+
     boards = usbrelay_py.board_details()
-#    print("Boards: ",boards)
-    for board in boards:
-#        print("Board: ",board)
-        relay = 1
-        # determine the state of each relay and publish to the MQTT broker
-        while(relay < board[1]+1):
-            if ( board[2] & ( 1 << (relay -1) )):
-                relay_state = "ON"
+    for serial, num_relays, all_state in boards:
+        for relay in range(num_relays):
+            if all_state & (1 << relay):
+                relay_state = True
             else:
-                relay_state = "OFF"
-            
-            
-            topic = "{0}/{1}/{2}"
-            topic_str = topic.format("stat",board[0],relay)
-            print("State: ", topic_str, relay_state,flush=True)
-            client.publish(topic_str, relay_state, qos=0, retain=True)
-            topic_str = topic.format("cmnd",board[0],relay)
-            print("Subscribed: ", topic_str,flush=True)
-            client.subscribe(topic_str)
-            relay += 1
-        
+                relay_state = False
 
-def on_message(client, userdata, message):
-    msg_state = str(message.payload.decode("utf-8"))
-    print("received message: " ,message.topic, msg_state,flush=True)
-    # any message other than ON is OFF
-    if( msg_state == "ON" ):
-        relay_cmd = 1
-    else:
-        relay_cmd = 0
-    
-    content = re.split("/",message.topic)
-    result = usbrelay_py.board_control(content[1],int(content[2]),relay_cmd)
-#    print("COntent: ", content , result)
-    pub_str = "stat/{0}/{1}"
-    client.publish(pub_str.format(content[1],content[2]), msg_state)
-
-# read the server name or IP address from the command lin
+            result[(serial, relay + 1)] = relay_state
+    return result
 
 
-config = configparser.ConfigParser()
-config.read('/etc/usbrelayd.conf')
-mqttBroker = config['MQTT']['BROKER']
-clientName = config['MQTT']['CLIENTNAME']
-
-print("MQTT Broker: ", mqttBroker)
-print("MQTT Client: ", clientName)
+def get_relay_identifier(identifier):
+    return f"{identifier[0]}-r{identifier[1]}"
 
 
-#
-# Count connected usbrelay modules, exit if none 
-count = usbrelay_py.board_count()
+class UsbRelay:
+    def __init__(
+        self, broker, client_id, username, password, discovery_prefix="homeassistant"
+    ):
+        self.client = paho.mqtt.client.Client(client_id)
+        if username is not None and password is not None:
+            self.client.username_pw_set(username=username, password=password)
 
-if(count < 1):
-    print("No usbrelay modules connected",flush=True)
-    # exit with EX_UNAVAILABLE
-    exit(69)
-else:
-    print("Modules Connected: ",count,flush=True)
+        self.discovery_prefix = discovery_prefix
+        self.prev_states = {}
+        self.command_topics = {}
+        self.lwt_topic = f"{self.discovery_prefix}/switch/usbhidrelay/lwt"
+        self.client.on_message = self.on_message
+        self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
+        self.client.will_set(self.lwt_topic, "offline", retain=True)
+        self.connected = False
+        self.client.connect(broker)
 
-# connect to the mqtt broker
+    def on_connect(self, client, userdata, flags, rc):
+        print(f"Connected with result code {rc}", flush=True)
+        self.publish_message(self.lwt_topic, "online", retain=True)
+        self.publish()
+        self.connected = True
+
+    def on_disconnect(self, client, userdata, rc):
+        print(f"Disconnected with result code {rc}", flush=True)
+        self.connected = False
+
+    def get_relay_topic_prefix(self, identifier):
+        return f"{self.discovery_prefix}/switch/usbhidrelay/{get_relay_identifier(identifier)}"
+
+    def get_state_topic(self, identifier):
+        topic_prefix = self.get_relay_topic_prefix(identifier)
+        return f"{topic_prefix}/stat"
+
+    def get_command_topic(self, identifier):
+        topic_prefix = self.get_relay_topic_prefix(identifier)
+        return f"{topic_prefix}/cmnd"
+
+    def get_config_topic(self, identifier):
+        topic_prefix = self.get_relay_topic_prefix(identifier)
+        return f"{topic_prefix}/config"
+
+    def publish_message(self, topic, payload, **kwargs):
+        print(f"Publishing: {topic} <- {payload!r}", flush=True)
+        self.client.publish(topic, payload, **kwargs)
+
+    def publish_discovery_for_relay(self, identifier):
+        topic = self.get_config_topic(identifier)
+        payload = json.dumps(
+            {
+                "name": f"USB HID relay {get_relay_identifier(identifier)}",
+                "cmd_t": self.get_command_topic(identifier),
+                "stat_t": self.get_state_topic(identifier),
+                "avty_t": self.lwt_topic,
+                "uniq_id": "usbhidrelay-" + get_relay_identifier(identifier),
+                "object_id": "usbhidrelay-" + get_relay_identifier(identifier),
+                "device": {
+                    "identifiers": [
+                        f"usbhidrelay-{identifier[0]}",
+                    ],
+                    "serial_number": identifier[0],
+                    "name": f"USB HID relay {identifier[0]}",
+                    "model": "with Python MQTT middleware",
+                },
+            }
+        )
+        self.publish_message(topic, payload, retain=True)
+
+    def publish(self):
+        relay_states = get_relay_states()
+        for identifier, state in relay_states.items():
+            prev_state = self.prev_states.get(identifier)
+            if prev_state is None:
+                command_topic = self.get_command_topic(identifier)
+                self.client.subscribe(command_topic)
+                self.command_topics[command_topic] = identifier
+                self.publish_discovery_for_relay(identifier)
+            if prev_state != state:
+                topic = self.get_state_topic(identifier)
+                payload = "ON" if state else "OFF"
+                self.publish_message(topic, payload, retain=True)
+                self.prev_states[identifier] = state
+        for identifier in list(self.prev_states):
+            if identifier not in relay_states:
+                self.prev_states.pop(identifier, None)
+                self.command_topics.pop(identifier, None)
+                self.publish_message(self.get_config_topic(identifier), "", retain=True)
+                self.client.unsubscribe(self.get_command_topic(identifier))
+
+    def on_message(self, client, userdata, message):
+        msg_state = str(message.payload.decode("utf-8"))
+        # any message other than ON is OFF
+        if msg_state == "ON":
+            relay_cmd = 1
+        else:
+            relay_cmd = 0
+        identifier = self.command_topics.get(message.topic)
+        print("received message: ", message.topic, identifier, msg_state, flush=True)
+        if identifier is None:
+            return
+        usbrelay_py.board_control(identifier[0], identifier[1], relay_cmd)
+        self.publish()
+
+    def run(self):
+        try:
+            while True:
+                self.client.loop_forever(timeout=10.0)
+                if self.connected:
+                    self.publish()
+        except KeyboardInterrupt:
+            self.publish_message(self.lwt_topic, "offline", retain=True)
+            self.client.disconnect()
 
 
-client = mqtt.Client(clientName)
-client.connect(mqttBroker) 
-publish_states(client)
-client.on_message=on_message 
-while(True):
-    client.loop_start()
-    time.sleep(60)
-    count = usbrelay_py.board_count()
-    if(count < 1):
-        print("No usbrelay modules connected",flush=True)
-        # exit with EX_UNAVAILABLE
-        exit(69)
-    publish_states(client)
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--broker", required=True)
+    ap.add_argument("--client", required=True)
+    ap.add_argument("--username")
+    ap.add_argument("--password")
+    args = ap.parse_args()
 
+    app = UsbRelay(
+        client_id=args.client,
+        broker=args.broker,
+        username=args.username,
+        password=args.password,
+    )
+    app.run()

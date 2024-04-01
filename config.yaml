@@ -1,0 +1,17 @@
+name: "usbrelay"
+description: "usbrelay mqtt addon"
+version: "1.0.0"
+slug: "usbrelay"
+init: false
+services:
+  - mqtt:want
+full_access: true
+arch:
+  - amd64
+schema:
+  mqtt_broker: str
+  mqtt_client: str
+  mqtt_username: str
+  mqtt_password: password
+options:
+  mqtt_client: "usbrelay"
